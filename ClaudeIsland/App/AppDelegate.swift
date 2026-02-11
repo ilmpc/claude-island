@@ -67,7 +67,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         Mixpanel.mainInstance().track(event: "App Launched")
         Mixpanel.mainInstance().flush()
 
-        HookInstaller.installIfNeeded()
+        HookInstaller.installIfNeeded(for: AppSettings.enabledProviders)
         NSApplication.shared.setActivationPolicy(.accessory)
 
         windowManager = WindowManager()

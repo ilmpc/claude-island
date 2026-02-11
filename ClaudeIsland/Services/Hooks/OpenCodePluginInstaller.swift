@@ -8,6 +8,8 @@
 import Foundation
 
 struct OpenCodePluginInstaller: ProviderIntegrationInstaller {
+    var provider: ProviderIntegration { .openCodePlugin }
+
     enum Scope {
         case project
         case global
@@ -49,19 +51,64 @@ struct OpenCodePluginInstaller: ProviderIntegrationInstaller {
     }
 
     func isInstalled() -> Bool {
+        status() == .installed
+    }
+
+    func status() -> ProviderInstallStatus {
         let scope = resolveScope()
         let pluginURL = pluginDirectory(for: scope).appendingPathComponent(Self.pluginFilename)
+        let configURL = opencodeConfigURL(for: scope)
 
-        guard let source = try? String(contentsOf: pluginURL),
-              source.contains(Self.managedFingerprint) else {
-            return false
+        let pluginExists = fileManager.fileExists(atPath: pluginURL.path)
+        let configExists = fileManager.fileExists(atPath: configURL.path)
+
+        var hasManagedPlugin = false
+        var hasConflictingPlugin = false
+
+        if pluginExists {
+            guard let source = try? String(contentsOf: pluginURL) else {
+                return .error
+            }
+
+            if source.contains(Self.managedFingerprint) {
+                hasManagedPlugin = true
+            } else {
+                hasConflictingPlugin = true
+            }
         }
 
         if mode == .npmPackage {
-            return configContainsManagedPackage(at: opencodeConfigURL(for: scope))
+            var hasManagedPackage = false
+            if configExists {
+                guard let data = try? Data(contentsOf: configURL),
+                      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let plugins = json["plugins"] as? [Any] else {
+                    return .error
+                }
+
+                hasManagedPackage = plugins.contains { ($0 as? String) == Self.npmPackageName }
+            }
+
+            if hasManagedPlugin && hasManagedPackage {
+                return .installed
+            }
+
+            if !hasManagedPlugin && !hasManagedPackage && !hasConflictingPlugin {
+                return .missing
+            }
+
+            return .conflict
         }
 
-        return true
+        if hasManagedPlugin {
+            return .installed
+        }
+
+        if !pluginExists {
+            return .missing
+        }
+
+        return .conflict
     }
 
     func uninstall() {
@@ -128,16 +175,6 @@ struct OpenCodePluginInstaller: ProviderIntegrationInstaller {
                 try? data.write(to: configURL)
             }
         }
-    }
-
-    private func configContainsManagedPackage(at configURL: URL) -> Bool {
-        guard let data = try? Data(contentsOf: configURL),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let plugins = json["plugins"] as? [Any] else {
-            return false
-        }
-
-        return plugins.contains { ($0 as? String) == Self.npmPackageName }
     }
 
     private func removeManagedPackageFromConfig(at configURL: URL) {

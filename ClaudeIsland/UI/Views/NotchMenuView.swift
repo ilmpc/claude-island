@@ -18,7 +18,8 @@ struct NotchMenuView: View {
     @ObservedObject private var updateManager = UpdateManager.shared
     @ObservedObject private var screenSelector = ScreenSelector.shared
     @ObservedObject private var soundSelector = SoundSelector.shared
-    @State private var hooksInstalled: Bool = false
+    @State private var enabledProviders: Set<ProviderIntegration> = AppSettings.enabledProviders
+    @State private var providerStatuses: [ProviderIntegration: ProviderInstallStatus] = [:]
     @State private var launchAtLogin: Bool = false
 
     var body: some View {
@@ -63,17 +64,21 @@ struct NotchMenuView: View {
             }
 
             MenuToggleRow(
-                icon: "arrow.triangle.2.circlepath",
-                label: "Hooks",
-                isOn: hooksInstalled
+                icon: "terminal",
+                label: ProviderIntegration.claudeCodeHooks.title,
+                isOn: enabledProviders.contains(.claudeCodeHooks),
+                status: providerStatuses[.claudeCodeHooks]
             ) {
-                if hooksInstalled {
-                    HookInstaller.uninstall()
-                    hooksInstalled = false
-                } else {
-                    HookInstaller.installIfNeeded()
-                    hooksInstalled = true
-                }
+                toggleProvider(.claudeCodeHooks)
+            }
+
+            MenuToggleRow(
+                icon: "puzzlepiece.extension",
+                label: ProviderIntegration.openCodePlugin.title,
+                isOn: enabledProviders.contains(.openCodePlugin),
+                status: providerStatuses[.openCodePlugin]
+            ) {
+                toggleProvider(.openCodePlugin)
             }
 
             AccessibilityRow(isEnabled: AXIsProcessTrusted())
@@ -120,9 +125,27 @@ struct NotchMenuView: View {
     }
 
     private func refreshStates() {
-        hooksInstalled = HookInstaller.isInstalled()
+        enabledProviders = AppSettings.enabledProviders
+
+        providerStatuses = Dictionary(uniqueKeysWithValues: ProviderIntegration.allCases.map { provider in
+            (provider, HookInstaller.status(for: provider))
+        })
+
         launchAtLogin = SMAppService.mainApp.status == .enabled
         screenSelector.refreshScreens()
+    }
+
+    private func toggleProvider(_ provider: ProviderIntegration) {
+        if enabledProviders.contains(provider) {
+            enabledProviders.remove(provider)
+            HookInstaller.uninstall(provider: provider)
+        } else {
+            enabledProviders.insert(provider)
+            HookInstaller.installIfNeeded(for: Set([provider]))
+        }
+
+        AppSettings.enabledProviders = enabledProviders
+        refreshStates()
     }
 }
 
@@ -483,6 +506,7 @@ struct MenuToggleRow: View {
     let icon: String
     let label: String
     let isOn: Bool
+    var status: ProviderInstallStatus? = nil
     let action: () -> Void
 
     @State private var isHovered = false
@@ -505,9 +529,9 @@ struct MenuToggleRow: View {
                     .fill(isOn ? TerminalColors.green : Color.white.opacity(0.3))
                     .frame(width: 6, height: 6)
 
-                Text(isOn ? "On" : "Off")
+                Text(status?.label ?? (isOn ? "On" : "Off"))
                     .font(.system(size: 11))
-                    .foregroundColor(.white.opacity(0.4))
+                    .foregroundColor(statusColor)
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
@@ -522,5 +546,20 @@ struct MenuToggleRow: View {
 
     private var textColor: Color {
         .white.opacity(isHovered ? 1.0 : 0.7)
+    }
+
+    private var statusColor: Color {
+        switch status {
+        case .installed:
+            return TerminalColors.green
+        case .missing:
+            return .white.opacity(0.45)
+        case .conflict:
+            return TerminalColors.amber
+        case .error:
+            return Color(red: 1.0, green: 0.4, blue: 0.4)
+        case nil:
+            return .white.opacity(0.4)
+        }
     }
 }

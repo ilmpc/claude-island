@@ -7,36 +7,80 @@
 
 import Foundation
 
+enum ProviderIntegration: String, CaseIterable, Hashable {
+    case claudeCodeHooks
+    case openCodePlugin
+
+    var title: String {
+        switch self {
+        case .claudeCodeHooks:
+            return "Claude Code Hooks"
+        case .openCodePlugin:
+            return "OpenCode Plugin"
+        }
+    }
+}
+
+enum ProviderInstallStatus {
+    case installed
+    case missing
+    case conflict
+    case error
+
+    var label: String {
+        switch self {
+        case .installed:
+            return "Installed"
+        case .missing:
+            return "Missing"
+        case .conflict:
+            return "Conflict"
+        case .error:
+            return "Error"
+        }
+    }
+}
+
 protocol ProviderIntegrationInstaller {
+    var provider: ProviderIntegration { get }
     func installIfNeeded()
     func isInstalled() -> Bool
+    func status() -> ProviderInstallStatus
     func uninstall()
 }
 
 struct HookInstaller {
 
-    private static let providerInstallers: [ProviderIntegrationInstaller] = [
-        HookInstaller(),
-        OpenCodePluginInstaller()
-    ]
+    private static let providerInstallers: [ProviderIntegration: any ProviderIntegrationInstaller] = {
+        let installers: [any ProviderIntegrationInstaller] = [
+            HookInstaller(),
+            OpenCodePluginInstaller()
+        ]
+        return Dictionary(uniqueKeysWithValues: installers.map { ($0.provider, $0) })
+    }()
 
-    /// Install hook script and update settings.json on app launch
-    static func installIfNeeded() {
-        providerInstallers.forEach { $0.installIfNeeded() }
+    static func installIfNeeded(for enabledProviders: Set<ProviderIntegration>) {
+        enabledProviders.forEach { provider in
+            providerInstallers[provider]?.installIfNeeded()
+        }
     }
 
-    /// Check if hooks are currently installed
-    static func isInstalled() -> Bool {
-        providerInstallers.allSatisfy { $0.isInstalled() }
+    static func isInstalled(for provider: ProviderIntegration) -> Bool {
+        providerInstallers[provider]?.isInstalled() ?? false
     }
 
-    /// Uninstall hooks from settings.json and remove script
-    static func uninstall() {
-        providerInstallers.forEach { $0.uninstall() }
+    static func status(for provider: ProviderIntegration) -> ProviderInstallStatus {
+        providerInstallers[provider]?.status() ?? .error
+    }
+
+    static func uninstall(provider: ProviderIntegration) {
+        providerInstallers[provider]?.uninstall()
     }
 }
 
 extension HookInstaller: ProviderIntegrationInstaller {
+    var provider: ProviderIntegration { .claudeCodeHooks }
+
     func installIfNeeded() {
         let claudeDir = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".claude")
@@ -126,31 +170,39 @@ extension HookInstaller: ProviderIntegrationInstaller {
     }
 
     func isInstalled() -> Bool {
+        status() == .installed
+    }
+
+    func status() -> ProviderInstallStatus {
         let claudeDir = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".claude")
-        let settings = claudeDir.appendingPathComponent("settings.json")
+        let scriptURL = claudeDir
+            .appendingPathComponent("hooks")
+            .appendingPathComponent("claude-island-state.py")
+        let settingsURL = claudeDir.appendingPathComponent("settings.json")
 
-        guard let data = try? Data(contentsOf: settings),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let hooks = json["hooks"] as? [String: Any] else {
-            return false
-        }
+        let scriptExists = FileManager.default.fileExists(atPath: scriptURL.path)
 
-        for (_, value) in hooks {
-            if let entries = value as? [[String: Any]] {
-                for entry in entries {
-                    if let entryHooks = entry["hooks"] as? [[String: Any]] {
-                        for hook in entryHooks {
-                            if let cmd = hook["command"] as? String,
-                               cmd.contains("claude-island-state.py") {
-                                return true
-                            }
-                        }
-                    }
-                }
+        var hookReferenceExists = false
+        if FileManager.default.fileExists(atPath: settingsURL.path) {
+            guard let data = try? Data(contentsOf: settingsURL),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let hooks = json["hooks"] as? [String: Any] else {
+                return .error
             }
+
+            hookReferenceExists = Self.settingsContainClaudeIslandHook(hooks)
         }
-        return false
+
+        if scriptExists && hookReferenceExists {
+            return .installed
+        }
+
+        if !scriptExists && !hookReferenceExists {
+            return .missing
+        }
+
+        return .conflict
     }
 
     func uninstall() {
@@ -218,5 +270,24 @@ extension HookInstaller: ProviderIntegrationInstaller {
         } catch {}
 
         return "python"
+    }
+
+    private static func settingsContainClaudeIslandHook(_ hooks: [String: Any]) -> Bool {
+        for (_, value) in hooks {
+            if let entries = value as? [[String: Any]] {
+                for entry in entries {
+                    if let entryHooks = entry["hooks"] as? [[String: Any]] {
+                        for hook in entryHooks {
+                            if let cmd = hook["command"] as? String,
+                               cmd.contains("claude-island-state.py") {
+                                return true
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        return false
     }
 }

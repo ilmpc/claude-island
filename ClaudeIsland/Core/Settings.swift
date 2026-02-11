@@ -38,6 +38,7 @@ enum AppSettings {
 
     private enum Keys {
         static let notificationSound = "notificationSound"
+        static let enabledProviders = "enabledProviders"
     }
 
     // MARK: - Notification Sound
@@ -55,4 +56,25 @@ enum AppSettings {
             defaults.set(newValue.rawValue, forKey: Keys.notificationSound)
         }
     }
+
+    // MARK: - Provider Integrations
+
+    static var enabledProviders: Set<ProviderIntegration> {
+        get {
+            guard let rawValues = defaults.array(forKey: Keys.enabledProviders) as? [String] else {
+                return Set(ProviderIntegration.allCases)
+            }
+
+            let providers = rawValues.compactMap(ProviderIntegration.init(rawValue:))
+            if providers.isEmpty {
+                return Set(ProviderIntegration.allCases)
+            }
+
+            return Set(providers)
+        }
+        set {
+            defaults.set(newValue.map(\.rawValue), forKey: Keys.enabledProviders)
+        }
+    }
+
 }
