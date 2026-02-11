@@ -115,7 +115,7 @@ actor SessionStore {
 
     // MARK: - Hook Event Processing
 
-    private func processHookEvent(_ event: HookEvent) async {
+    private func processHookEvent(_ event: NormalizedHookEvent) async {
         let sessionId = event.sessionId
         let isNewSession = sessions[sessionId] == nil
         var session = sessions[sessionId] ?? createSession(from: event)
@@ -149,7 +149,7 @@ actor SessionStore {
             Self.logger.debug("Invalid transition: \(String(describing: session.phase), privacy: .public) -> \(String(describing: newPhase), privacy: .public), ignoring")
         }
 
-        if event.event == "PermissionRequest", let toolUseId = event.toolUseId {
+        if event.rawEventName == "PermissionRequest", let toolUseId = event.toolCallId {
             Self.logger.debug("Setting tool \(toolUseId.prefix(12), privacy: .public) status to waitingForApproval")
             updateToolStatus(in: &session, toolId: toolUseId, status: .waitingForApproval)
         }
@@ -157,7 +157,7 @@ actor SessionStore {
         processToolTracking(event: event, session: &session)
         processSubagentTracking(event: event, session: &session)
 
-        if event.event == "Stop" {
+        if event.rawEventName == "Stop" {
             session.subagentState = SubagentState()
         }
 
@@ -169,7 +169,7 @@ actor SessionStore {
         }
     }
 
-    private func createSession(from event: HookEvent) -> SessionState {
+    private func createSession(from event: NormalizedHookEvent) -> SessionState {
         SessionState(
             sessionId: event.sessionId,
             cwd: event.cwd,
@@ -181,10 +181,10 @@ actor SessionStore {
         )
     }
 
-    private func processToolTracking(event: HookEvent, session: inout SessionState) {
-        switch event.event {
+    private func processToolTracking(event: NormalizedHookEvent, session: inout SessionState) {
+        switch event.rawEventName {
         case "PreToolUse":
-            if let toolUseId = event.toolUseId, let toolName = event.tool {
+            if let toolUseId = event.toolCallId, let toolName = event.toolName {
                 session.toolTracker.startTool(id: toolUseId, name: toolName)
 
                 // Skip creating top-level placeholder for subagent tools
@@ -227,7 +227,7 @@ actor SessionStore {
             }
 
         case "PostToolUse":
-            if let toolUseId = event.toolUseId {
+            if let toolUseId = event.toolCallId {
                 session.toolTracker.completeTool(id: toolUseId, success: true)
                 // Update chatItem status - tool completed (possibly approved via terminal)
                 // Only update if still waiting for approval or running
@@ -251,17 +251,17 @@ actor SessionStore {
         }
     }
 
-    private func processSubagentTracking(event: HookEvent, session: inout SessionState) {
-        switch event.event {
+    private func processSubagentTracking(event: NormalizedHookEvent, session: inout SessionState) {
+        switch event.rawEventName {
         case "PreToolUse":
-            if event.tool == "Task", let toolUseId = event.toolUseId {
+            if event.toolName == "Task", let toolUseId = event.toolCallId {
                 let description = event.toolInput?["description"]?.value as? String
                 session.subagentState.startTask(taskToolId: toolUseId, description: description)
                 Self.logger.debug("Started Task subagent tracking: \(toolUseId.prefix(12), privacy: .public)")
             }
 
         case "PostToolUse":
-            if event.tool == "Task" {
+            if event.toolName == "Task" {
                 Self.logger.debug("PostToolUse for Task received (subagent still running)")
             }
 

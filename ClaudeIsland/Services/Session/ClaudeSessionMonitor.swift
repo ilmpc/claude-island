@@ -33,30 +33,32 @@ class ClaudeSessionMonitor: ObservableObject {
     func startMonitoring() {
         HookSocketServer.shared.start(
             onEvent: { event in
+                let normalizedEvent = ClaudeEventAdapter.normalize(event)
+
                 Task {
-                    await SessionStore.shared.process(.hookReceived(event))
+                    await SessionStore.shared.process(.hookReceived(normalizedEvent))
                 }
 
-                if event.sessionPhase == .processing {
+                if normalizedEvent.determinePhase() == .processing {
                     Task { @MainActor in
                         InterruptWatcherManager.shared.startWatching(
-                            sessionId: event.sessionId,
-                            cwd: event.cwd
+                            sessionId: normalizedEvent.sessionId,
+                            cwd: normalizedEvent.cwd
                         )
                     }
                 }
 
-                if event.status == "ended" {
+                if normalizedEvent.status == "ended" {
                     Task { @MainActor in
-                        InterruptWatcherManager.shared.stopWatching(sessionId: event.sessionId)
+                        InterruptWatcherManager.shared.stopWatching(sessionId: normalizedEvent.sessionId)
                     }
                 }
 
-                if event.event == "Stop" {
-                    HookSocketServer.shared.cancelPendingPermissions(sessionId: event.sessionId)
+                if normalizedEvent.rawEventName == "Stop" {
+                    HookSocketServer.shared.cancelPendingPermissions(sessionId: normalizedEvent.sessionId)
                 }
 
-                if event.event == "PostToolUse", let toolUseId = event.toolUseId {
+                if normalizedEvent.rawEventName == "PostToolUse", let toolUseId = normalizedEvent.toolCallId {
                     HookSocketServer.shared.cancelPendingPermission(toolUseId: toolUseId)
                 }
             },
