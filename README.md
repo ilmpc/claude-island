@@ -37,7 +37,18 @@ xcodebuild -scheme ClaudeIsland -configuration Release build
 
 ## How It Works
 
-Claude Island installs hooks into `~/.claude/hooks/` that communicate session state via a Unix socket. The app listens for events and displays them in the notch overlay.
+Claude Island supports two provider integrations that can be enabled independently from the menu:
+
+- **Claude Code Hooks**
+  - Installs `claude-island-state.py` in `~/.claude/hooks/`.
+  - Registers hook commands in `~/.claude/settings.json` so Claude Code emits lifecycle events.
+- **OpenCode Plugin**
+  - Installs `claude-island-opencode-plugin.ts` in either:
+    - Project scope: `<current-project>/.opencode/plugins/`
+    - Global scope: `~/.config/opencode/plugins/`
+  - In npm plugin mode, updates OpenCode config at `<current-project>/opencode.json` or `~/.config/opencode/opencode.json`.
+
+The app listens for hook/plugin events over a Unix socket and displays them in the notch overlay.
 
 When Claude needs permission to run a tool, the notch expands with approve/deny buttons—no need to switch to the terminal.
 
