@@ -14,7 +14,7 @@ enum SessionEvent: Sendable {
     // MARK: - Hook Events (from HookSocketServer)
 
     /// A hook event was received from Claude Code
-    case hookReceived(HookEvent)
+    case hookReceived(NormalizedHookEvent)
 
     // MARK: - Permission Events (user actions)
 
@@ -126,25 +126,25 @@ struct ToolCompletionResult: Sendable {
 
 // MARK: - Hook Event Extensions
 
-extension HookEvent {
+extension NormalizedHookEvent {
     /// Determine the target session phase based on this hook event
     nonisolated func determinePhase() -> SessionPhase {
         // PreCompact takes priority
-        if event == "PreCompact" {
+        if rawEventName == "PreCompact" {
             return .compacting
         }
 
         // Permission request creates waitingForApproval state
-        if expectsResponse, let tool = tool {
+        if expectsResponse, let tool = toolName {
             return .waitingForApproval(PermissionContext(
-                toolUseId: toolUseId ?? "",
+                toolUseId: toolCallId ?? "",
                 toolName: tool,
                 toolInput: toolInput,
                 receivedAt: Date()
             ))
         }
 
-        if event == "Notification" && notificationType == "idle_prompt" {
+        if rawEventName == "Notification" && notificationType == "idle_prompt" {
             return .idle
         }
 
@@ -164,17 +164,22 @@ extension HookEvent {
 
     /// Whether this is a tool-related event
     nonisolated var isToolEvent: Bool {
-        event == "PreToolUse" || event == "PostToolUse" || event == "PermissionRequest"
+        rawEventName == "PreToolUse" || rawEventName == "PostToolUse" || rawEventName == "PermissionRequest"
     }
 
     /// Whether this event should trigger a file sync
     nonisolated var shouldSyncFile: Bool {
-        switch event {
+        switch rawEventName {
         case "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop":
             return true
         default:
             return false
         }
+    }
+
+    /// Whether this event expects a response (permission request)
+    nonisolated var expectsResponse: Bool {
+        rawEventName == "PermissionRequest" && status == "waiting_for_approval"
     }
 }
 
@@ -184,7 +189,7 @@ extension SessionEvent: CustomStringConvertible {
     nonisolated var description: String {
         switch self {
         case .hookReceived(let event):
-            return "hookReceived(\(event.event), session: \(event.sessionId.prefix(8)))"
+            return "hookReceived(\(event.rawEventName), session: \(event.sessionId.prefix(8)))"
         case .permissionApproved(let sessionId, let toolUseId):
             return "permissionApproved(session: \(sessionId.prefix(8)), tool: \(toolUseId.prefix(12)))"
         case .permissionDenied(let sessionId, let toolUseId, _):
