@@ -7,10 +7,37 @@
 
 import Foundation
 
+protocol ProviderIntegrationInstaller {
+    func installIfNeeded()
+    func isInstalled() -> Bool
+    func uninstall()
+}
+
 struct HookInstaller {
+
+    private static let providerInstallers: [ProviderIntegrationInstaller] = [
+        HookInstaller(),
+        OpenCodePluginInstaller()
+    ]
 
     /// Install hook script and update settings.json on app launch
     static func installIfNeeded() {
+        providerInstallers.forEach { $0.installIfNeeded() }
+    }
+
+    /// Check if hooks are currently installed
+    static func isInstalled() -> Bool {
+        providerInstallers.allSatisfy { $0.isInstalled() }
+    }
+
+    /// Uninstall hooks from settings.json and remove script
+    static func uninstall() {
+        providerInstallers.forEach { $0.uninstall() }
+    }
+}
+
+extension HookInstaller: ProviderIntegrationInstaller {
+    func installIfNeeded() {
         let claudeDir = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".claude")
         let hooksDir = claudeDir.appendingPathComponent("hooks")
@@ -31,7 +58,7 @@ struct HookInstaller {
             )
         }
 
-        updateSettings(at: settings)
+        Self.updateSettings(at: settings)
     }
 
     private static func updateSettings(at settingsURL: URL) {
@@ -98,8 +125,7 @@ struct HookInstaller {
         }
     }
 
-    /// Check if hooks are currently installed
-    static func isInstalled() -> Bool {
+    func isInstalled() -> Bool {
         let claudeDir = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".claude")
         let settings = claudeDir.appendingPathComponent("settings.json")
@@ -127,8 +153,7 @@ struct HookInstaller {
         return false
     }
 
-    /// Uninstall hooks from settings.json and remove script
-    static func uninstall() {
+    func uninstall() {
         let claudeDir = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".claude")
         let hooksDir = claudeDir.appendingPathComponent("hooks")
