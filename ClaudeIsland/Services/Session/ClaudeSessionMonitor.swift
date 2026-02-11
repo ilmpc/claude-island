@@ -33,7 +33,25 @@ class ClaudeSessionMonitor: ObservableObject {
     func startMonitoring() {
         HookSocketServer.shared.start(
             onEvent: { event in
-                let normalizedEvent = ClaudeEventAdapter.normalize(event)
+                let normalizedEvent: NormalizedHookEvent
+                if event.provider == .openCode {
+                    normalizedEvent = NormalizedHookEvent(
+                        provider: .openCode,
+                        sessionId: event.sessionId,
+                        cwd: event.cwd,
+                        status: event.status,
+                        toolName: event.tool,
+                        toolInput: event.toolInput,
+                        toolCallId: event.toolCallId,
+                        message: event.message,
+                        notificationType: event.notificationType,
+                        rawEventName: event.event,
+                        pid: event.pid,
+                        tty: event.tty
+                    )
+                } else {
+                    normalizedEvent = ClaudeEventAdapter.normalize(event)
+                }
 
                 Task {
                     await SessionStore.shared.process(.hookReceived(normalizedEvent))
@@ -86,7 +104,7 @@ class ClaudeSessionMonitor: ObservableObject {
             }
 
             HookSocketServer.shared.respondToPermission(
-                toolUseId: permission.toolUseId,
+                toolUseId: HookSocketServer.shared.getPendingPermission(sessionId: sessionId)?.toolId ?? permission.toolUseId,
                 decision: "allow"
             )
 
@@ -104,7 +122,7 @@ class ClaudeSessionMonitor: ObservableObject {
             }
 
             HookSocketServer.shared.respondToPermission(
-                toolUseId: permission.toolUseId,
+                toolUseId: HookSocketServer.shared.getPendingPermission(sessionId: sessionId)?.toolId ?? permission.toolUseId,
                 decision: "deny",
                 reason: reason
             )

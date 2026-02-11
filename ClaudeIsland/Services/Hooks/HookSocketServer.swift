@@ -9,11 +9,26 @@
 import Foundation
 import os.log
 
+enum HookProvider: String, Codable, Sendable {
+    case claude
+    case openCode = "opencode"
+
+    init(fromRawValue rawValue: String?) {
+        switch rawValue?.lowercased() {
+        case "opencode", "open_code":
+            self = .openCode
+        default:
+            self = .claude
+        }
+    }
+}
+
 /// Logger for hook socket server
 private let logger = Logger(subsystem: "com.claudeisland", category: "Hooks")
 
 /// Event received from Claude Code hooks
 struct HookEvent: Codable, Sendable {
+    let provider: HookProvider
     let sessionId: String
     let cwd: String
     let event: String
@@ -22,21 +37,58 @@ struct HookEvent: Codable, Sendable {
     let tty: String?
     let tool: String?
     let toolInput: [String: AnyCodable]?
-    let toolUseId: String?
+    let toolCallId: String?
     let notificationType: String?
     let message: String?
 
     enum CodingKeys: String, CodingKey {
+        case provider
         case sessionId = "session_id"
         case cwd, event, status, pid, tty, tool
         case toolInput = "tool_input"
         case toolUseId = "tool_use_id"
+        case toolCallId = "tool_call_id"
         case notificationType = "notification_type"
         case message
     }
 
-    /// Create a copy with updated toolUseId
-    init(sessionId: String, cwd: String, event: String, status: String, pid: Int?, tty: String?, tool: String?, toolInput: [String: AnyCodable]?, toolUseId: String?, notificationType: String?, message: String?) {
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+
+        provider = HookProvider(fromRawValue: try container.decodeIfPresent(String.self, forKey: .provider))
+        sessionId = try container.decode(String.self, forKey: .sessionId)
+        cwd = try container.decode(String.self, forKey: .cwd)
+        event = try container.decode(String.self, forKey: .event)
+        status = try container.decode(String.self, forKey: .status)
+        pid = try container.decodeIfPresent(Int.self, forKey: .pid)
+        tty = try container.decodeIfPresent(String.self, forKey: .tty)
+        tool = try container.decodeIfPresent(String.self, forKey: .tool)
+        toolInput = try container.decodeIfPresent([String: AnyCodable].self, forKey: .toolInput)
+        toolCallId = try container.decodeIfPresent(String.self, forKey: .toolCallId)
+            ?? container.decodeIfPresent(String.self, forKey: .toolUseId)
+        notificationType = try container.decodeIfPresent(String.self, forKey: .notificationType)
+        message = try container.decodeIfPresent(String.self, forKey: .message)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(provider.rawValue, forKey: .provider)
+        try container.encode(sessionId, forKey: .sessionId)
+        try container.encode(cwd, forKey: .cwd)
+        try container.encode(event, forKey: .event)
+        try container.encode(status, forKey: .status)
+        try container.encodeIfPresent(pid, forKey: .pid)
+        try container.encodeIfPresent(tty, forKey: .tty)
+        try container.encodeIfPresent(tool, forKey: .tool)
+        try container.encodeIfPresent(toolInput, forKey: .toolInput)
+        try container.encodeIfPresent(toolCallId, forKey: .toolCallId)
+        try container.encodeIfPresent(notificationType, forKey: .notificationType)
+        try container.encodeIfPresent(message, forKey: .message)
+    }
+
+    /// Create a copy with updated toolCallId
+    init(provider: HookProvider, sessionId: String, cwd: String, event: String, status: String, pid: Int?, tty: String?, tool: String?, toolInput: [String: AnyCodable]?, toolCallId: String?, notificationType: String?, message: String?) {
+        self.provider = provider
         self.sessionId = sessionId
         self.cwd = cwd
         self.event = event
@@ -45,7 +97,7 @@ struct HookEvent: Codable, Sendable {
         self.tty = tty
         self.tool = tool
         self.toolInput = toolInput
-        self.toolUseId = toolUseId
+        self.toolCallId = toolCallId
         self.notificationType = notificationType
         self.message = message
     }
@@ -60,7 +112,7 @@ struct HookEvent: Codable, Sendable {
             // Note: Full PermissionContext is constructed by SessionStore, not here
             // This is just for quick phase checks
             return .waitingForApproval(PermissionContext(
-                toolUseId: toolUseId ?? "",
+                toolUseId: toolCallId ?? "",
                 toolName: tool ?? "unknown",
                 toolInput: toolInput,
                 receivedAt: Date()
@@ -90,8 +142,10 @@ struct HookResponse: Codable {
 
 /// Pending permission request waiting for user decision
 struct PendingPermission: Sendable {
+    let provider: HookProvider
     let sessionId: String
-    let toolUseId: String
+    let toolCallId: String
+    let permissionId: String
     let clientSocket: Int32
     let event: HookEvent
     let receivedAt: Date
@@ -115,11 +169,11 @@ class HookSocketServer {
     private var permissionFailureHandler: PermissionFailureHandler?
     private let queue = DispatchQueue(label: "com.claudeisland.socket", qos: .userInitiated)
 
-    /// Pending permission requests indexed by toolUseId
+    /// Pending permission requests indexed by provider-aware permission ID
     private var pendingPermissions: [String: PendingPermission] = [:]
     private let permissionsLock = NSLock()
 
-    /// Cache tool_use_id from PreToolUse to correlate with PermissionRequest
+    /// Cache tool_use_id from PreToolUse to correlate with Claude PermissionRequest
     /// Key: "sessionId:toolName:serializedInput" -> Queue of tool_use_ids (FIFO)
     /// PermissionRequest events don't include tool_use_id, so we cache from PreToolUse
     private var toolUseIdCache: [String: [String]] = [:]
@@ -212,7 +266,7 @@ class HookSocketServer {
         permissionsLock.unlock()
     }
 
-    /// Respond to a pending permission request by toolUseId
+    /// Respond to a pending permission request by provider-aware permission ID
     func respondToPermission(toolUseId: String, decision: String, reason: String? = nil) {
         queue.async { [weak self] in
             self?.sendPermissionResponse(toolUseId: toolUseId, decision: decision, reason: reason)
@@ -247,7 +301,7 @@ class HookSocketServer {
         guard let pending = pendingPermissions.values.first(where: { $0.sessionId == sessionId }) else {
             return nil
         }
-        return (pending.event.tool, pending.toolUseId, pending.event.toolInput)
+        return (pending.event.tool, pending.permissionId, pending.event.toolInput)
     }
 
     /// Cancel a specific pending permission by toolUseId (when tool completes via terminal approval)
@@ -259,25 +313,37 @@ class HookSocketServer {
 
     private func cleanupSpecificPermission(toolUseId: String) {
         permissionsLock.lock()
-        guard let pending = pendingPermissions.removeValue(forKey: toolUseId) else {
+        var pending = pendingPermissions.removeValue(forKey: toolUseId)
+        if pending == nil, let fallbackKey = pendingPermissions.first(where: { $0.value.toolCallId == toolUseId })?.key {
+            pending = pendingPermissions.removeValue(forKey: fallbackKey)
+        }
+
+        guard let pending else {
             permissionsLock.unlock()
             return
         }
         permissionsLock.unlock()
 
-        logger.debug("Tool completed externally, closing socket for \(pending.sessionId.prefix(8), privacy: .public) tool:\(toolUseId.prefix(12), privacy: .public)")
+        logger.debug("Tool completed externally, closing socket for \(pending.sessionId.prefix(8), privacy: .public) tool:\(pending.toolCallId.prefix(12), privacy: .public)")
         close(pending.clientSocket)
     }
 
     private func cleanupPendingPermissions(sessionId: String) {
         permissionsLock.lock()
         let matching = pendingPermissions.filter { $0.value.sessionId == sessionId }
-        for (toolUseId, pending) in matching {
-            logger.debug("Cleaning up stale permission for \(sessionId.prefix(8), privacy: .public) tool:\(toolUseId.prefix(12), privacy: .public)")
+        for (permissionId, pending) in matching {
+            logger.debug("Cleaning up stale permission for \(sessionId.prefix(8), privacy: .public) tool:\(pending.toolCallId.prefix(12), privacy: .public)")
             close(pending.clientSocket)
-            pendingPermissions.removeValue(forKey: toolUseId)
+            pendingPermissions.removeValue(forKey: permissionId)
         }
         permissionsLock.unlock()
+    }
+
+    private func makePermissionId(provider: HookProvider, sessionId: String, toolCallId: String) -> String {
+        if provider == .openCode {
+            return "\(provider.rawValue):\(sessionId):\(toolCallId)"
+        }
+        return toolCallId
     }
 
     // MARK: - Tool Use ID Cache
@@ -304,7 +370,7 @@ class HookSocketServer {
 
     /// Cache tool_use_id from PreToolUse event (FIFO queue per key)
     private func cacheToolUseId(event: HookEvent) {
-        guard let toolUseId = event.toolUseId else { return }
+        guard event.provider == .claude, let toolUseId = event.toolCallId else { return }
 
         let key = cacheKey(sessionId: event.sessionId, toolName: event.tool, toolInput: event.toolInput)
 
@@ -422,11 +488,11 @@ class HookSocketServer {
         }
 
         if event.expectsResponse {
-            let toolUseId: String
-            if let eventToolUseId = event.toolUseId {
-                toolUseId = eventToolUseId
-            } else if let cachedToolUseId = popCachedToolUseId(event: event) {
-                toolUseId = cachedToolUseId
+            let toolCallId: String
+            if let eventToolCallId = event.toolCallId {
+                toolCallId = eventToolCallId
+            } else if event.provider == .claude, let cachedToolUseId = popCachedToolUseId(event: event) {
+                toolCallId = cachedToolUseId
             } else {
                 logger.warning("Permission request missing tool_use_id for \(event.sessionId.prefix(8), privacy: .public) - no cache hit")
                 close(clientSocket)
@@ -434,9 +500,12 @@ class HookSocketServer {
                 return
             }
 
-            logger.debug("Permission request - keeping socket open for \(event.sessionId.prefix(8), privacy: .public) tool:\(toolUseId.prefix(12), privacy: .public)")
+            let permissionId = makePermissionId(provider: event.provider, sessionId: event.sessionId, toolCallId: toolCallId)
+
+            logger.debug("Permission request - keeping socket open for \(event.sessionId.prefix(8), privacy: .public) provider:\(event.provider.rawValue, privacy: .public) tool:\(toolCallId.prefix(12), privacy: .public)")
 
             let updatedEvent = HookEvent(
+                provider: event.provider,
                 sessionId: event.sessionId,
                 cwd: event.cwd,
                 event: event.event,
@@ -445,20 +514,22 @@ class HookSocketServer {
                 tty: event.tty,
                 tool: event.tool,
                 toolInput: event.toolInput,
-                toolUseId: toolUseId,  // Use resolved toolUseId
+                toolCallId: toolCallId,
                 notificationType: event.notificationType,
                 message: event.message
             )
 
             let pending = PendingPermission(
+                provider: event.provider,
                 sessionId: event.sessionId,
-                toolUseId: toolUseId,
+                toolCallId: toolCallId,
+                permissionId: permissionId,
                 clientSocket: clientSocket,
                 event: updatedEvent,
                 receivedAt: Date()
             )
             permissionsLock.lock()
-            pendingPermissions[toolUseId] = pending
+            pendingPermissions[permissionId] = pending
             permissionsLock.unlock()
 
             eventHandler?(updatedEvent)
@@ -472,7 +543,12 @@ class HookSocketServer {
 
     private func sendPermissionResponse(toolUseId: String, decision: String, reason: String?) {
         permissionsLock.lock()
-        guard let pending = pendingPermissions.removeValue(forKey: toolUseId) else {
+        var pending = pendingPermissions.removeValue(forKey: toolUseId)
+        if pending == nil, let fallbackKey = pendingPermissions.first(where: { $0.value.toolCallId == toolUseId })?.key {
+            pending = pendingPermissions.removeValue(forKey: fallbackKey)
+        }
+
+        guard let pending else {
             permissionsLock.unlock()
             logger.debug("No pending permission for toolUseId: \(toolUseId.prefix(12), privacy: .public)")
             return
@@ -486,7 +562,7 @@ class HookSocketServer {
         }
 
         let age = Date().timeIntervalSince(pending.receivedAt)
-        logger.info("Sending response: \(decision, privacy: .public) for \(pending.sessionId.prefix(8), privacy: .public) tool:\(toolUseId.prefix(12), privacy: .public) (age: \(String(format: "%.1f", age), privacy: .public)s)")
+        logger.info("Sending response: \(decision, privacy: .public) for \(pending.sessionId.prefix(8), privacy: .public) provider:\(pending.provider.rawValue, privacy: .public) tool:\(pending.toolCallId.prefix(12), privacy: .public) (age: \(String(format: "%.1f", age), privacy: .public)s)")
 
         data.withUnsafeBytes { bytes in
             guard let baseAddress = bytes.baseAddress else {
@@ -517,18 +593,18 @@ class HookSocketServer {
             return
         }
 
-        pendingPermissions.removeValue(forKey: pending.toolUseId)
+        pendingPermissions.removeValue(forKey: pending.permissionId)
         permissionsLock.unlock()
 
         let response = HookResponse(decision: decision, reason: reason)
         guard let data = try? JSONEncoder().encode(response) else {
             close(pending.clientSocket)
-            permissionFailureHandler?(sessionId, pending.toolUseId)
+            permissionFailureHandler?(sessionId, pending.toolCallId)
             return
         }
 
         let age = Date().timeIntervalSince(pending.receivedAt)
-        logger.info("Sending response: \(decision, privacy: .public) for \(sessionId.prefix(8), privacy: .public) tool:\(pending.toolUseId.prefix(12), privacy: .public) (age: \(String(format: "%.1f", age), privacy: .public)s)")
+        logger.info("Sending response: \(decision, privacy: .public) for \(sessionId.prefix(8), privacy: .public) provider:\(pending.provider.rawValue, privacy: .public) tool:\(pending.toolCallId.prefix(12), privacy: .public) (age: \(String(format: "%.1f", age), privacy: .public)s)")
 
         var writeSuccess = false
         data.withUnsafeBytes { bytes in
@@ -548,7 +624,7 @@ class HookSocketServer {
         close(pending.clientSocket)
 
         if !writeSuccess {
-            permissionFailureHandler?(sessionId, pending.toolUseId)
+            permissionFailureHandler?(sessionId, pending.toolCallId)
         }
     }
 }
