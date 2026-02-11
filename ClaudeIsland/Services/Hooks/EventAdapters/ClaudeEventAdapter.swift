@@ -9,7 +9,7 @@ enum ClaudeEventAdapter {
             status: event.status,
             toolName: event.tool,
             toolInput: event.toolInput,
-            toolCallId: event.toolUseId,
+            toolCallId: event.toolCallId,
             message: event.message,
             notificationType: event.notificationType,
             rawEventName: event.event,
