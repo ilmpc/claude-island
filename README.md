@@ -41,6 +41,21 @@ Claude Island installs hooks into `~/.claude/hooks/` that communicate session st
 
 When Claude needs permission to run a tool, the notch expands with approve/deny buttons—no need to switch to the terminal.
 
+## OpenCode Hook Compatibility
+
+The OpenCode bridge plugin accepts documented hook names and keeps typed/camelCase aliases for one release. Alias usage is supported with deprecation warnings so integrators can migrate safely.
+
+| Expected hook name | Fallback alias | Required payload fields |
+| --- | --- | --- |
+| `session.created` | `sessionCreated` | `sessionID` |
+| `session.updated` | `sessionUpdated` | `sessionID` |
+| `session.idle` | `sessionIdle` | `sessionID` |
+| `session.error` | `sessionError` | `sessionID` |
+| `session.ended` | `sessionEnded` | `sessionID` |
+| `tool.execute.before` | `toolExecuteBefore` | `sessionID`, `callID`, tool name (`tool`) |
+| `tool.execute.after` | `toolExecuteAfter` | `sessionID`, `callID`, tool name (`tool`) |
+| `permission.ask` | `permissionAsk` | `sessionID`, `callID`, tool name (`tool`) |
+
 ## Analytics
 
 Claude Island uses Mixpanel to collect anonymous usage data:

@@ -25,6 +25,43 @@ type BridgeOptions = {
 
 const DEFAULT_SOCKET_PATH = "/tmp/claude-island.sock";
 
+const HOOK_EVENT_NAMES = {
+  sessionCreated: {
+    expected: "session.created",
+    aliases: ["sessionCreated"],
+  },
+  sessionUpdated: {
+    expected: "session.updated",
+    aliases: ["sessionUpdated"],
+  },
+  sessionIdle: {
+    expected: "session.idle",
+    aliases: ["sessionIdle"],
+  },
+  sessionError: {
+    expected: "session.error",
+    aliases: ["sessionError"],
+  },
+  sessionEnded: {
+    expected: "session.ended",
+    aliases: ["sessionEnded"],
+  },
+  toolExecuteBefore: {
+    expected: "tool.execute.before",
+    aliases: ["toolExecuteBefore"],
+  },
+  toolExecuteAfter: {
+    expected: "tool.execute.after",
+    aliases: ["toolExecuteAfter"],
+  },
+  permissionAsk: {
+    expected: "permission.ask",
+    aliases: ["permissionAsk"],
+  },
+} as const;
+
+type HookEventConfig = (typeof HOOK_EVENT_NAMES)[keyof typeof HOOK_EVENT_NAMES];
+
 function sendWithNodeSocket(
   payload: BridgePayload,
   socketPath: string,
@@ -147,14 +184,66 @@ function makePayload(
 export function createClaudeIslandOpenCodePlugin(options: BridgeOptions = {}): Plugin {
   const socketPath = options.socketPath ?? DEFAULT_SOCKET_PATH;
 
-  const hooks: Hooks = {
-    "session.created": async context => {
+  const hooks: Hooks = {};
+  const runtimeBindingDiagnostics: string[] = [];
+
+  const registerHookVariants = <TContext>(
+    eventConfig: HookEventConfig,
+    handler: (context: TContext) => Promise<unknown>,
+    options: { returnsDecision?: boolean } = {},
+  ): void => {
+    const eventNames = [eventConfig.expected, ...eventConfig.aliases];
+
+    for (const eventName of eventNames) {
+      hooks[eventName] = async context => {
+        const isAlias = eventName !== eventConfig.expected;
+
+        if (isAlias) {
+          const deprecationMessage = `[claude-island-opencode-bridge] Hook alias '${eventName}' is deprecated and will be removed in the next release. Prefer '${eventConfig.expected}'.`;
+          runtimeBindingDiagnostics.push(`alias:${eventName}`);
+          console.warn(deprecationMessage);
+          await sendToClaudeIsland(
+            makePayload("Notification", {
+              sessionID: (context as { sessionID?: string }).sessionID ?? "opencode-plugin",
+              cwd: (context as { cwd?: string }).cwd ?? process.cwd(),
+              status: "bridge_warning",
+              message: deprecationMessage,
+              notificationType: "bridge_deprecation",
+            }),
+            socketPath,
+          );
+        }
+
+        const safeContext = context as TContext | undefined;
+        if (!safeContext) {
+          runtimeBindingDiagnostics.push(`noop:${eventName}`);
+          return options.returnsDecision ? { decision: "ask" as const } : undefined;
+        }
+
+        return handler(safeContext);
+      };
+    }
+
+    runtimeBindingDiagnostics.push(`bound:${eventConfig.expected}`);
+  };
+
+  registerHookVariants<{ sessionID: string; cwd: string; pid?: number; tty?: string }>(
+    HOOK_EVENT_NAMES.sessionCreated,
+    async context => {
       await sendToClaudeIsland(makePayload("SessionStart", { ...context, status: "starting" }), socketPath);
     },
-    "session.updated": async context => {
+  );
+
+  registerHookVariants<{ sessionID: string; cwd: string; pid?: number; tty?: string }>(
+    HOOK_EVENT_NAMES.sessionUpdated,
+    async context => {
       await sendToClaudeIsland(makePayload("SessionUpdate", { ...context, status: "processing" }), socketPath);
     },
-    "session.idle": async context => {
+  );
+
+  registerHookVariants<{ sessionID: string; cwd: string; pid?: number; tty?: string }>(
+    HOOK_EVENT_NAMES.sessionIdle,
+    async context => {
       await sendToClaudeIsland(
         makePayload("Notification", {
           ...context,
@@ -164,7 +253,11 @@ export function createClaudeIslandOpenCodePlugin(options: BridgeOptions = {}): P
         socketPath,
       );
     },
-    "session.error": async context => {
+  );
+
+  registerHookVariants<{ sessionID: string; cwd: string; error?: unknown; pid?: number; tty?: string }>(
+    HOOK_EVENT_NAMES.sessionError,
+    async context => {
       await sendToClaudeIsland(
         makePayload("SessionError", {
           ...context,
@@ -174,10 +267,18 @@ export function createClaudeIslandOpenCodePlugin(options: BridgeOptions = {}): P
         socketPath,
       );
     },
-    "session.ended": async context => {
+  );
+
+  registerHookVariants<{ sessionID: string; cwd: string; pid?: number; tty?: string }>(
+    HOOK_EVENT_NAMES.sessionEnded,
+    async context => {
       await sendToClaudeIsland(makePayload("SessionEnd", { ...context, status: "ended" }), socketPath);
     },
-    "tool.execute.before": async context => {
+  );
+
+  registerHookVariants<{ sessionID: string; cwd: string; tool: string; input?: unknown; callID?: string }>(
+    HOOK_EVENT_NAMES.toolExecuteBefore,
+    async context => {
       await sendToClaudeIsland(
         makePayload("PreToolUse", {
           ...context,
@@ -189,7 +290,11 @@ export function createClaudeIslandOpenCodePlugin(options: BridgeOptions = {}): P
         socketPath,
       );
     },
-    "tool.execute.after": async context => {
+  );
+
+  registerHookVariants<{ sessionID: string; cwd: string; tool: string; input?: unknown; callID?: string; error?: unknown }>(
+    HOOK_EVENT_NAMES.toolExecuteAfter,
+    async context => {
       await sendToClaudeIsland(
         makePayload("PostToolUse", {
           ...context,
@@ -202,7 +307,11 @@ export function createClaudeIslandOpenCodePlugin(options: BridgeOptions = {}): P
         socketPath,
       );
     },
-    "permission.ask": async context => {
+  );
+
+  registerHookVariants<{ sessionID: string; cwd: string; tool: string; input?: unknown; callID?: string }>(
+    HOOK_EVENT_NAMES.permissionAsk,
+    async context => {
       const decision = await sendToClaudeIsland(
         makePayload("PermissionRequest", {
           ...context,
@@ -225,7 +334,21 @@ export function createClaudeIslandOpenCodePlugin(options: BridgeOptions = {}): P
 
       return { decision: "ask" as const };
     },
-  };
+    { returnsDecision: true },
+  );
+
+  const startupMessage = `Bridge hook bindings ready: ${runtimeBindingDiagnostics.join(", ")}`;
+  console.info(`[claude-island-opencode-bridge] ${startupMessage}`);
+  void sendToClaudeIsland(
+    makePayload("Notification", {
+      sessionID: "opencode-plugin",
+      cwd: process.cwd(),
+      status: "bridge_ready",
+      message: startupMessage,
+      notificationType: "bridge_startup",
+    }),
+    socketPath,
+  );
 
   return {
     name: "claude-island-opencode-bridge",
